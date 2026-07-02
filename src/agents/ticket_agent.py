@@ -9,11 +9,11 @@ src/agents/ticket_agent.py
 import json
 from typing import Dict, Any
 
-from python_a2a import AgentCard, AgentSkill, TaskStatus, TaskState, run_server
+from python_a2a import AgentCard, AgentSkill, run_server
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.config import config, logger
-from src.agents.base_agent import BaseAgent, MCPClientMixin
+from src.agents.base_agent import AgentReply, BaseAgent, MCPClientMixin
 
 
 # 数据表Schema定义
@@ -226,6 +226,8 @@ class TicketQueryAgent(BaseAgent, MCPClientMixin):
             if isinstance(records, dict):
                 if records.get("status") == "no_data":
                     return "😔 " + records.get("message", "未找到数据")
+                if records.get("status") == "error":
+                    return f"查询失败: {records.get('message', '未知错误')}"
                 records = records.get("data", [records])
             
             if not records:
@@ -276,51 +278,40 @@ class TicketQueryAgent(BaseAgent, MCPClientMixin):
             logger.error(f"格式化结果失败: {e}")
             return f"查询结果: {data}"
     
-    async def handle_task(self, task) -> TaskStatus:
-        """处理查询任务"""
-        try:
-            # 提取用户输入
-            user_input = self.extract_user_input(task)
-            
-            if not user_input:
-                return self.input_required_response(self.get_welcome_message())
-            
-            logger.info(f"收到票务查询: {user_input}")
-            
-            # 生成SQL
-            sql_result = self.generate_sql(user_input)
-            logger.info(f"SQL生成结果: {sql_result}")
-            
-            # 处理追问
-            if sql_result.get("status") == "input_required":
-                return self.input_required_response(
-                    sql_result.get("message", "请提供更多信息")
-                )
-            
-            # 执行查询
-            if sql_result.get("status") == "sql":
-                query_type = sql_result.get("type", "unknown")
-                sql = sql_result.get("sql", "")
-                
-                # 调用MCP
-                mcp_result = await self.call_mcp_tool(
-                    self.mcp_url, 
-                    "query_tickets", 
-                    {"sql": sql}
-                )
-                
-                if mcp_result.get("status") == "error":
-                    return self.error_response(f"查询失败: {mcp_result.get('message')}")
-                
-                # 格式化结果
-                formatted = self.format_results(query_type, mcp_result.get("data", ""))
-                return self.success_response(formatted)
-            
-            return self.error_response("无法处理您的请求，请重试。")
-            
-        except Exception as e:
-            logger.error(f"处理任务失败: {e}", exc_info=True)
-            return self.error_response(f"处理请求时发生错误: {str(e)}")
+    async def process(self, user_input: str) -> AgentReply:
+        """处理票务查询"""
+        logger.info(f"收到票务查询: {user_input}")
+
+        # 生成SQL
+        sql_result = self.generate_sql(user_input)
+        logger.info(f"SQL生成结果: {sql_result}")
+
+        # 处理追问
+        if sql_result.get("status") == "input_required":
+            return self.create_input_required_response(
+                sql_result.get("message", "请提供更多信息")
+            )
+
+        # 执行查询
+        if sql_result.get("status") == "sql":
+            query_type = sql_result.get("type", "unknown")
+            sql = sql_result.get("sql", "")
+
+            # 调用MCP
+            mcp_result = await self.call_mcp_tool(
+                self.mcp_url,
+                "query_tickets",
+                {"sql": sql}
+            )
+
+            if mcp_result.get("status") == "error":
+                return self.create_error_response(f"查询失败: {mcp_result.get('message')}")
+
+            # 格式化结果
+            formatted = self.format_results(query_type, mcp_result.get("data", ""))
+            return self.create_success_response(formatted)
+
+        return self.create_error_response("无法处理您的请求，请重试。")
 
 
 def main():

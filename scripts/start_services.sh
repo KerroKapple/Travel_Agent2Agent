@@ -31,33 +31,23 @@ echo "项目目录: $PROJECT_ROOT"
 echo "日志目录: $LOG_DIR"
 echo "============================================================"
 
-# 检查Python环境
-check_python() {
-    if ! command -v python3 &> /dev/null; then
-        echo -e "${RED}错误: 未找到 Python3${NC}"
+# 检查 uv 环境（本项目统一使用 uv 管理 Python）
+check_uv() {
+    if ! command -v uv &> /dev/null; then
+        echo -e "${RED}错误: 未找到 uv，请先安装 https://docs.astral.sh/uv/${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✓ Python3 已安装${NC}"
+    echo -e "${GREEN}✓ uv 已安装${NC}"
 }
 
-# 检查虚拟环境
-check_venv() {
-    if [ -d "$PROJECT_ROOT/venv" ]; then
-        source "$PROJECT_ROOT/venv/bin/activate"
-        echo -e "${GREEN}✓ 已激活虚拟环境${NC}"
-    else
-        echo -e "${YELLOW}⚠ 未找到虚拟环境，使用系统Python${NC}"
-    fi
-}
-
-# 检查依赖
+# 同步依赖
 check_dependencies() {
-    echo "检查依赖..."
-    python3 -c "import mysql.connector" 2>/dev/null || {
-        echo -e "${RED}错误: 缺少 mysql-connector-python${NC}"
+    echo "同步依赖 (uv sync)..."
+    uv sync --quiet || {
+        echo -e "${RED}错误: uv sync 失败${NC}"
         exit 1
     }
-    echo -e "${GREEN}✓ 依赖检查通过${NC}"
+    echo -e "${GREEN}✓ 依赖就绪${NC}"
 }
 
 # 启动MCP服务
@@ -67,21 +57,21 @@ start_mcp_services() {
     
     # Weather MCP
     echo -n "  启动 Weather MCP (8000)... "
-    python3 -m src.mcp_servers.weather_mcp > "$LOG_DIR/weather_mcp.log" 2>&1 &
+    uv run python -m src.mcp_servers.weather_mcp > "$LOG_DIR/weather_mcp.log" 2>&1 &
     echo $! > "$PID_DIR/weather_mcp.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
     
     # Ticket MCP
     echo -n "  启动 Ticket MCP (8001)... "
-    python3 -m src.mcp_servers.ticket_mcp > "$LOG_DIR/ticket_mcp.log" 2>&1 &
+    uv run python -m src.mcp_servers.ticket_mcp > "$LOG_DIR/ticket_mcp.log" 2>&1 &
     echo $! > "$PID_DIR/ticket_mcp.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
     
     # Order MCP
     echo -n "  启动 Order MCP (8002)... "
-    python3 -m src.mcp_servers.order_mcp > "$LOG_DIR/order_mcp.log" 2>&1 &
+    uv run python -m src.mcp_servers.order_mcp > "$LOG_DIR/order_mcp.log" 2>&1 &
     echo $! > "$PID_DIR/order_mcp.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
@@ -94,21 +84,21 @@ start_agent_services() {
     
     # Weather Agent
     echo -n "  启动 Weather Agent (5005)... "
-    python3 -m src.agents.weather_agent > "$LOG_DIR/weather_agent.log" 2>&1 &
+    uv run python -m src.agents.weather_agent > "$LOG_DIR/weather_agent.log" 2>&1 &
     echo $! > "$PID_DIR/weather_agent.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
     
     # Ticket Agent
     echo -n "  启动 Ticket Agent (5006)... "
-    python3 -m src.agents.ticket_agent > "$LOG_DIR/ticket_agent.log" 2>&1 &
+    uv run python -m src.agents.ticket_agent > "$LOG_DIR/ticket_agent.log" 2>&1 &
     echo $! > "$PID_DIR/ticket_agent.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
     
     # Order Agent
     echo -n "  启动 Order Agent (5007)... "
-    python3 -m src.agents.order_agent > "$LOG_DIR/order_agent.log" 2>&1 &
+    uv run python -m src.agents.order_agent > "$LOG_DIR/order_agent.log" 2>&1 &
     echo $! > "$PID_DIR/order_agent.pid"
     sleep 1
     echo -e "${GREEN}✓${NC}"
@@ -119,7 +109,7 @@ start_web() {
     echo ""
     echo "启动Web应用..."
     echo -n "  启动 Streamlit (8501)... "
-    streamlit run src/app.py --server.port=8501 --server.address=0.0.0.0 > "$LOG_DIR/streamlit.log" 2>&1 &
+    uv run streamlit run src/app.py --server.port=8501 --server.address=0.0.0.0 > "$LOG_DIR/streamlit.log" 2>&1 &
     echo $! > "$PID_DIR/streamlit.pid"
     sleep 2
     echo -e "${GREEN}✓${NC}"
@@ -169,8 +159,7 @@ stop_all() {
 main() {
     case "${1:-start}" in
         start)
-            check_python
-            check_venv
+            check_uv
             check_dependencies
             start_mcp_services
             start_agent_services

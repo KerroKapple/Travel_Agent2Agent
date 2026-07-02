@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-天气查询Agent
+天气查询 Agent
 src/agents/weather_agent.py
 
-处理天气查询请求，调用天气MCP服务获取数据
+自然语言 -> LLM 生成 SQL -> 天气 MCP 查询 -> 格式化输出
 """
 
 import json
-from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
 
-from python_a2a import AgentCard, AgentSkill, TaskStatus, TaskState
+from python_a2a import AgentCard, AgentSkill
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.agents.base_agent import BaseAgent, MCPClientMixin
+from src.agents.base_agent import AgentReply, BaseAgent, MCPClientMixin
 from src.config import config, logger
 
 
@@ -53,7 +52,8 @@ CREATE TABLE weather_data (
 3. 如果用户说"明天"，使用当前日期+1天
 4. 如果用户说"后天"，使用当前日期+2天
 5. 如果用户说"这周"或"未来几天"，查询未来7天
-6. 如果缺少城市信息，返回追问JSON
+6. 只允许生成单条SELECT语句，禁止任何写操作
+7. 如果缺少城市信息，返回追问JSON
 
 【输出格式】
 如果信息完整，直接输出SELECT语句（查询字段：city, fx_date, temp_max, temp_min, text_day, text_night, humidity, wind_dir_day, wind_scale_day, precip, uv_index）
@@ -74,7 +74,7 @@ CREATE TABLE weather_data (
 # ==================== Agent卡片定义 ====================
 agent_card = AgentCard(
     name="WeatherQueryAgent",
-    description="天气查询代理，提供城市天气预报查询服务",
+    description="天气查询代理，提供城市天气预报查询服务（本地mock数据）",
     url=f"http://localhost:{config.agents.weather_port}",
     version="2.0.0",
     capabilities={
@@ -103,27 +103,16 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
         super().__init__(agent_card=agent_card)
         self.sql_prompt = SQL_PROMPT
         self.mcp_url = config.mcp.weather_url
-        logger.info("WeatherQueryAgent 初始化完成")
 
     def get_welcome_message(self) -> str:
         return "请输入您的天气查询需求，例如：北京明天天气怎么样"
 
     def generate_sql(self, user_query: str) -> Dict[str, Any]:
-        """
-        使用LLM生成SQL
-
-        Args:
-            user_query: 用户查询
-
-        Returns:
-            包含sql的字典或追问信息
-        """
+        """LLM 生成 SQL 或追问信息"""
         try:
             chain = self.sql_prompt | self.llm
-            current_date = self.get_current_date()
-
             output = chain.invoke({
-                "current_date": current_date,
+                "current_date": self.current_date,
                 "user_query": user_query
             }).content.strip()
 
@@ -141,11 +130,9 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
                         lines.append(line)
                 output = '\n'.join(lines).strip()
 
-            # 检查是否是追问
             if output.startswith('{"status"'):
                 return json.loads(output)
 
-            # 是SQL语句
             if "SELECT" in output.upper():
                 return {"status": "sql", "sql": output}
 
@@ -159,15 +146,7 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
             return {"status": "input_required", "message": f"处理失败: {str(e)}"}
 
     def format_weather_results(self, data: str) -> str:
-        """
-        格式化天气查询结果
-
-        Args:
-            data: JSON格式的查询结果
-
-        Returns:
-            格式化后的文本
-        """
+        """格式化天气查询结果"""
         try:
             records = json.loads(data) if isinstance(data, str) else data
 
@@ -177,13 +156,14 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
             if isinstance(records, dict):
                 if records.get("status") == "no_data":
                     return "😔 未找到天气数据，请确认城市和日期是否正确。"
+                if records.get("status") == "error":
+                    return f"查询失败: {records.get('message', '未知错误')}"
                 if "data" in records:
                     records = records["data"]
                 else:
                     records = [records]
 
-            lines = []
-            lines.append(f"🌤️ 天气预报查询结果：\n")
+            lines = [f"🌤️ 天气预报查询结果：\n"]
 
             for w in records:
                 city = w.get('city', '未知')
@@ -198,7 +178,6 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
                 precip = w.get('precip', 0)
                 uv_index = w.get('uv_index', '-')
 
-                # 天气图标
                 weather_icon = self._get_weather_icon(text_day)
 
                 lines.append(f"📍 {city} - {date}")
@@ -211,7 +190,7 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
                 lines.append(f"   ☀️ 紫外线指数: {uv_index}")
                 lines.append("")
 
-            # 添加温馨提示
+            # 温馨提示
             if records:
                 first = records[0]
                 temp_max = int(first.get('temp_max', 20) or 20)
@@ -222,12 +201,10 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
                     tips.append("🔥 高温预警，注意防暑降温")
                 elif temp_max <= 5:
                     tips.append("❄️ 天气寒冷，注意保暖")
-
                 if '雨' in text_day:
                     tips.append("🌂 记得带伞")
                 if '雪' in text_day:
                     tips.append("⛄ 注意路滑")
-
                 if tips:
                     lines.append("💡 温馨提示: " + "，".join(tips))
 
@@ -240,7 +217,6 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
             return f"天气数据: {data}"
 
     def _get_weather_icon(self, weather_text: str) -> str:
-        """根据天气描述返回对应图标"""
         weather_icons = {
             '晴': '☀️',
             '多云': '⛅',
@@ -256,59 +232,39 @@ class WeatherQueryAgent(BaseAgent, MCPClientMixin):
             '雾': '🌫️',
             '霾': '😷',
         }
-
         for key, icon in weather_icons.items():
             if key in (weather_text or ''):
                 return icon
         return '🌤️'
 
-    async def handle_task(self, task) -> TaskStatus:
-        """处理天气查询任务"""
-        try:
-            # 1. 提取用户输入
-            user_input = self.extract_user_input(task)
+    async def process(self, user_input: str) -> AgentReply:
+        """处理天气查询"""
+        logger.info(f"收到天气查询: {user_input}")
 
-            if not user_input:
-                return self.create_input_required_response(self.get_welcome_message())
+        sql_result = self.generate_sql(user_input)
+        logger.info(f"SQL生成结果: {sql_result}")
 
-            logger.info(f"收到天气查询: {user_input}")
+        if sql_result.get("status") == "input_required":
+            return self.create_input_required_response(
+                sql_result.get("message", "请提供更多信息")
+            )
 
-            # 2. 生成SQL
-            sql_result = self.generate_sql(user_input)
-            logger.info(f"SQL生成结果: {sql_result}")
+        if sql_result.get("status") == "sql":
+            mcp_result = await self.call_mcp_tool(
+                self.mcp_url,
+                "query_weather",
+                {"sql": sql_result.get("sql", "")}
+            )
 
-            # 3. 处理追问
-            if sql_result.get("status") == "input_required":
-                return self.create_input_required_response(
-                    sql_result.get("message", "请提供更多信息")
+            if mcp_result.get("status") == "error":
+                return self.create_error_response(
+                    f"查询失败: {mcp_result.get('message')}"
                 )
 
-            # 4. 执行查询
-            if sql_result.get("status") == "sql":
-                sql = sql_result.get("sql", "")
+            formatted = self.format_weather_results(mcp_result.get("data", ""))
+            return self.create_success_response(formatted)
 
-                # 调用MCP
-                mcp_result = await self.call_mcp_tool(
-                    self.mcp_url,
-                    "query_weather",
-                    {"sql": sql}
-                )
-
-                if mcp_result.get("status") == "error":
-                    return self.create_error_response(
-                        f"查询失败: {mcp_result.get('message')}"
-                    )
-
-                # 格式化结果
-                formatted = self.format_weather_results(mcp_result.get("data", ""))
-
-                return self.create_success_response(formatted)
-
-            return self.create_error_response("无法处理您的请求，请重试。")
-
-        except Exception as e:
-            logger.error(f"处理天气查询任务失败: {e}", exc_info=True)
-            return self.create_error_response(f"处理请求时发生错误: {str(e)}")
+        return self.create_error_response("无法处理您的请求，请重试。")
 
 
 # ==================== 主函数 ====================

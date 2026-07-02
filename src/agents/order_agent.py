@@ -9,14 +9,13 @@ src/agents/order_agent.py
 import json
 import re
 import uuid
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-import httpx
+from typing import Dict, Any, List
 
-from python_a2a import AgentCard, AgentSkill, TaskStatus, TaskState
+from python_a2a import A2AClient, AgentCard, AgentSkill, Task, TaskState
+
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.agents.base_agent import BaseAgent, MCPClientMixin
+from src.agents.base_agent import AgentReply, BaseAgent, MCPClientMixin
 from src.config import config, logger
 
 
@@ -134,51 +133,43 @@ agent_card = AgentCard(
 
 
 class TicketAgentClient:
-    """票务Agent客户端"""
+    """票务 Agent 的 A2A 客户端（Agent 间通信走 A2A 协议）"""
 
     def __init__(self, agent_url: str):
         self.agent_url = agent_url
 
+    @staticmethod
+    def _extract_text(task: Task) -> str:
+        """从返回的 Task 中提取文本：完成态取 artifacts，其余取 status.message"""
+        if task.status.state == TaskState.COMPLETED and task.artifacts:
+            parts = task.artifacts[0].get("parts", [])
+            if parts and isinstance(parts[0], dict):
+                return parts[0].get("text", "")
+        message = task.status.message or {}
+        content = message.get("content", {})
+        if isinstance(content, dict):
+            return content.get("text", "")
+        return str(content)
+
     async def query_tickets(self, query_text: str) -> Dict[str, Any]:
         """调用票务Agent查询余票"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                request_data = {
-                    "jsonrpc": "2.0",
-                    "method": "tasks/send",
-                    "params": {
-                        "message": {
-                            "role": "user",
-                            "content": query_text
-                        }
-                    },
-                    "id": str(uuid.uuid4())
-                }
+            client = A2AClient(self.agent_url, timeout=30)
+            task = Task(
+                id=f"task-{uuid.uuid4()}",
+                message={
+                    "role": "user",
+                    "content": {"type": "text", "text": query_text},
+                },
+            )
+            result = await client.send_task_async(task)
+            logger.info(f"票务Agent响应状态: {result.status.state}")
 
-                response = await client.post(
-                    f"{self.agent_url}/a2a",
-                    json=request_data,
-                    headers={"Content-Type": "application/json"}
-                )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f"票务Agent响应: {result}")
-
-                    if "result" in result:
-                        task_result = result["result"]
-                        if isinstance(task_result, dict):
-                            message = task_result.get("message", {})
-                            content = message.get("content", "") if isinstance(message, dict) else str(message)
-                            state = task_result.get("state", "")
-                            return {
-                                "status": "success" if state == "completed" else state,
-                                "content": content
-                            }
-
-                    return {"status": "error", "message": "无法解析票务Agent响应"}
-                else:
-                    return {"status": "error", "message": f"HTTP错误: {response.status_code}"}
+            state = result.status.state
+            return {
+                "status": "success" if state == TaskState.COMPLETED else str(state.value),
+                "content": self._extract_text(result),
+            }
 
         except Exception as e:
             logger.error(f"调用票务Agent失败: {e}")
@@ -202,10 +193,9 @@ class OrderBookingAgent(BaseAgent, MCPClientMixin):
         """解析用户订票意图"""
         try:
             chain = self.intent_prompt | self.llm
-            current_date = self.get_current_date()
 
             output = chain.invoke({
-                "current_date": current_date,
+                "current_date": self.current_date,
                 "user_input": user_input
             }).content.strip()
 
@@ -298,119 +288,100 @@ class OrderBookingAgent(BaseAgent, MCPClientMixin):
         else:
             return f"❌ 订票失败: {result.get('message', '未知错误')}"
 
-    async def handle_task(self, task) -> TaskStatus:
-        """处理订票任务"""
-        try:
-            # 1. 提取用户输入
-            user_input = self.extract_user_input(task)
+    async def _place_order(self, intent: Dict[str, Any], ticket_id: int) -> AgentReply:
+        """调用订单MCP下单"""
+        contact = intent.get("contact", {})
+        order_data = {
+            "ticket_type": intent.get("ticket_type", "train"),
+            "ticket_id": ticket_id,
+            "quantity": intent.get("quantity", 1),
+            "contact_name": contact.get("name", ""),
+            "contact_phone": contact.get("phone", ""),
+            "contact_id_card": contact.get("id_card", "")
+        }
 
-            if not user_input:
-                return self.create_input_required_response(self.get_welcome_message())
+        mcp_result = await self.call_mcp_tool(
+            self.order_mcp_url,
+            "create_order",
+            order_data
+        )
 
-            logger.info(f"收到订票请求: {user_input}")
+        # MCP 返回的 data 是订单服务的 JSON 字符串
+        order_result = mcp_result
+        if mcp_result.get("status") == "success":
+            try:
+                order_result = json.loads(mcp_result.get("data", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                order_result = mcp_result
 
-            # 2. 解析意图
-            intent = self.parse_intent(user_input)
-            logger.info(f"解析意图: {intent}")
+        formatted = self.format_booking_result(order_result)
 
-            # 3. 检查是否需要补充信息
-            if intent.get("status") == "input_required":
-                return self.create_input_required_response(
-                    intent.get("message", "请提供更多订票信息")
-                )
+        if order_result.get("status") == "success":
+            return self.create_success_response(formatted)
+        return self.create_error_response(formatted)
 
-            # 4. 检查联系人信息
-            contact = intent.get("contact", {})
-            if not contact.get("name") or not contact.get("phone"):
-                return self.create_input_required_response(
-                    "请提供联系人姓名和手机号码，例如：张三，13800138000"
-                )
+    async def process(self, user_input: str) -> AgentReply:
+        """处理订票请求"""
+        logger.info(f"收到订票请求: {user_input}")
 
-            # 5. 如果有票务ID，直接下单
-            ticket_id = intent.get("ticket_id")
-            if ticket_id:
-                logger.info(f"使用指定票务ID下单: {ticket_id}")
+        # 1. 解析意图
+        intent = self.parse_intent(user_input)
+        logger.info(f"解析意图: {intent}")
 
-                order_data = {
-                    "ticket_type": intent.get("ticket_type", "train"),
-                    "ticket_id": ticket_id,
-                    "quantity": intent.get("quantity", 1),
-                    "contact_name": contact.get("name", ""),
-                    "contact_phone": contact.get("phone", ""),
-                    "contact_id_card": contact.get("id_card", "")
-                }
+        # 2. 检查是否需要补充信息
+        if intent.get("status") == "input_required":
+            return self.create_input_required_response(
+                intent.get("message", "请提供更多订票信息")
+            )
 
-                order_result = await self.call_mcp_tool(
-                    self.order_mcp_url,
-                    "create_order",
-                    order_data
-                )
-                formatted = self.format_booking_result(order_result)
+        # 3. 检查联系人信息
+        contact = intent.get("contact", {})
+        if not contact.get("name") or not contact.get("phone"):
+            return self.create_input_required_response(
+                "请提供联系人姓名和手机号码，例如：张三，13800138000"
+            )
 
-                if order_result.get("status") == "success":
-                    return self.create_success_response(formatted)
-                else:
-                    return self.create_error_response(formatted)
+        # 4. 如果有票务ID，直接下单
+        ticket_id = intent.get("ticket_id")
+        if ticket_id:
+            logger.info(f"使用指定票务ID下单: {ticket_id}")
+            return await self._place_order(intent, ticket_id)
 
-            # 6. 调用票务Agent查询余票
-            query_text = self.build_query_text(intent)
-            logger.info(f"查询余票: {query_text}")
+        # 5. 调用票务Agent查询余票（A2A 协作）
+        query_text = self.build_query_text(intent)
+        logger.info(f"查询余票: {query_text}")
 
-            ticket_result = await self.ticket_client.query_tickets(query_text)
-            logger.info(f"余票查询结果: {ticket_result}")
+        ticket_result = await self.ticket_client.query_tickets(query_text)
+        logger.info(f"余票查询结果: {ticket_result}")
 
-            if ticket_result.get("status") == "error":
-                return self.create_error_response(
-                    f"查询余票失败: {ticket_result.get('message')}"
-                )
+        if ticket_result.get("status") == "error":
+            return self.create_error_response(
+                f"查询余票失败: {ticket_result.get('message')}"
+            )
 
-            # 7. 检查余票
-            content = ticket_result.get("content", "")
+        # 6. 检查余票
+        content = ticket_result.get("content", "")
 
-            if "未找到" in content or "没有" in content:
-                return self.create_input_required_response(
-                    f"😔 {content}\n\n请调整您的出行计划：\n- 尝试其他日期\n- 尝试其他座位类型\n- 尝试其他车次/航班"
-                )
+        if "未找到" in content or "没有" in content:
+            return self.create_input_required_response(
+                f"😔 {content}\n\n请调整您的出行计划：\n- 尝试其他日期\n- 尝试其他座位类型\n- 尝试其他车次/航班"
+            )
 
-            # 8. 提取票务ID
-            ticket_ids = self.extract_ticket_ids(content)
+        # 7. 提取票务ID
+        ticket_ids = self.extract_ticket_ids(content)
 
-            if not ticket_ids:
-                return self.create_input_required_response(
-                    f"查询到以下票务信息：\n\n{content}\n\n请提供您要预订的票务ID，例如：订票务ID 123"
-                )
+        if not ticket_ids:
+            return self.create_input_required_response(
+                f"查询到以下票务信息：\n\n{content}\n\n请提供您要预订的票务ID，例如：订票务ID 123"
+            )
 
-            # 9. 如果只有一个选择，自动下单
-            if len(ticket_ids) == 1:
-                order_data = {
-                    "ticket_type": intent.get("ticket_type", "train"),
-                    "ticket_id": ticket_ids[0],
-                    "quantity": intent.get("quantity", 1),
-                    "contact_name": contact.get("name", ""),
-                    "contact_phone": contact.get("phone", ""),
-                    "contact_id_card": contact.get("id_card", "")
-                }
+        # 8. 唯一选项自动下单，多个选项让用户指定
+        if len(ticket_ids) == 1:
+            return await self._place_order(intent, ticket_ids[0])
 
-                order_result = await self.call_mcp_tool(
-                    self.order_mcp_url,
-                    "create_order",
-                    order_data
-                )
-                formatted = self.format_booking_result(order_result)
-
-                if order_result.get("status") == "success":
-                    return self.create_success_response(formatted)
-                else:
-                    return self.create_error_response(formatted)
-            else:
-                # 多个选择，让用户指定
-                return self.create_input_required_response(
-                    f"查询到多个票务选项：\n\n{content}\n\n请指定您要预订的票务ID，例如：订票务ID {ticket_ids[0]}"
-                )
-
-        except Exception as e:
-            logger.error(f"处理订票任务失败: {e}", exc_info=True)
-            return self.create_error_response(f"处理订票请求时发生错误: {str(e)}")
+        return self.create_input_required_response(
+            f"查询到多个票务选项：\n\n{content}\n\n请指定您要预订的票务ID，例如：订票务ID {ticket_ids[0]}"
+        )
 
 
 # ==================== 主函数 ====================

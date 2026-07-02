@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-MCP服务基类
+MCP 数据服务基类
 src/mcp_servers/base_service.py
 
-提供MCP服务的通用功能
+双后端数据访问层：SQLite（默认，零外部依赖）/ MySQL
+- 内部查询一律参数化（占位符统一写 %s，SQLite 自动转 ?）
+- LLM 生成的 SQL 必须走 execute_select，经 sql_guard 校验
 """
 
 import json
+import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-import mysql.connector
-from mysql.connector import Error as MySQLError
-
 from src.config import config, logger
+from src.mcp_servers.sql_guard import SQLGuardError, validate_select
 
 
 class DateTimeEncoder(json.JSONEncoder):
-    """自定义JSON编码器，处理日期时间类型"""
+    """处理日期时间/Decimal 的 JSON 编码器"""
 
     def default(self, obj):
         if isinstance(obj, datetime):
@@ -33,145 +34,153 @@ class DateTimeEncoder(json.JSONEncoder):
 
 
 class DatabaseService:
-    """数据库服务基类"""
+    """数据库服务基类（SQLite / MySQL 双后端）"""
 
     def __init__(self):
-        """初始化数据库连接"""
+        self.backend = config.database.backend
         self._conn = None
         self._connect()
 
+    # ---------- 连接管理 ----------
+
     def _connect(self):
-        """建立数据库连接"""
-        try:
-            self._conn = mysql.connector.connect(
-                host=config.database.host,
-                port=config.database.port,
-                user=config.database.user,
-                password=config.database.password,
-                database=config.database.name,
-                charset='utf8mb4',
-                autocommit=True
-            )
-            logger.info("数据库连接成功")
-        except MySQLError as e:
-            logger.error(f"数据库连接失败: {e}")
-            raise
+        if self.backend == "sqlite":
+            path = config.database.sqlite_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            logger.info(f"SQLite 连接成功: {path}")
+        else:
+            import mysql.connector  # 仅 MySQL 后端需要
+            self._conn = mysql.connector.connect(**config.database.mysql_params)
+            logger.info(f"MySQL 连接成功: {config.database.describe}")
 
     def _ensure_connection(self):
-        """确保数据库连接有效"""
+        if self.backend == "sqlite":
+            if self._conn is None:
+                self._connect()
+            return
         try:
             if self._conn is None or not self._conn.is_connected():
                 self._connect()
-        except MySQLError:
+        except Exception:
             self._connect()
 
-    def execute_query(self, sql: str) -> str:
-        """
-        执行SQL查询
+    def _adapt(self, sql: str, params: Optional[tuple]) -> tuple:
+        """占位符适配：SQLite 使用 ?，MySQL 使用 %s"""
+        if self.backend == "sqlite" and params:
+            sql = sql.replace("%s", "?")
+        return sql, params or ()
 
-        Args:
-            sql: SQL查询语句
+    # ---------- 查询 ----------
 
-        Returns:
-            JSON格式的查询结果
-        """
+    def _fetch_all(self, sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         self._ensure_connection()
+        sql, params = self._adapt(sql, params)
 
-        try:
+        if self.backend == "sqlite":
+            cursor = self._conn.execute(sql, params)
+            rows = [dict(r) for r in cursor.fetchall()]
+            cursor.close()
+        else:
             cursor = self._conn.cursor(dictionary=True)
-            cursor.execute(sql)
-            results = cursor.fetchall()
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
             cursor.close()
 
-            # 格式化特殊类型
-            for row in results:
-                for key, value in row.items():
-                    if isinstance(value, (date, datetime, timedelta, Decimal)):
-                        row[key] = self._encode_value(value)
+        for row in rows:
+            for key, value in row.items():
+                row[key] = self._encode_value(value)
+        return rows
 
-            if results:
-                return json.dumps(
-                    {"status": "success", "data": results},
-                    cls=DateTimeEncoder,
-                    ensure_ascii=False
-                )
-            else:
-                return json.dumps(
-                    {"status": "no_data", "message": "未找到数据"},
-                    ensure_ascii=False
-                )
+    def execute_select(self, sql: str, allowed_tables) -> str:
+        """
+        执行 Text2SQL 生成的查询（唯一允许原样 SQL 的入口）
 
-        except MySQLError as e:
-            logger.error(f"SQL执行错误: {e}")
+        经 sql_guard 校验：单条 SELECT + 表白名单 + 强制 LIMIT
+        """
+        try:
+            safe_sql = validate_select(sql, allowed_tables)
+        except SQLGuardError as e:
+            logger.warning(f"SQL 被安全层拦截: {e} | SQL: {sql}")
             return json.dumps(
-                {"status": "error", "message": str(e)},
+                {"status": "error", "message": f"SQL 校验失败: {e}"},
                 ensure_ascii=False
             )
 
-    def execute_insert(self, sql: str, params: tuple = None) -> Dict[str, Any]:
-        """
-        执行INSERT语句
+        try:
+            rows = self._fetch_all(safe_sql)
+        except Exception as e:
+            logger.error(f"SQL执行错误: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
-        Args:
-            sql: INSERT语句
-            params: 参数元组
+        if rows:
+            return json.dumps(
+                {"status": "success", "data": rows},
+                cls=DateTimeEncoder, ensure_ascii=False
+            )
+        return json.dumps({"status": "no_data", "message": "未找到数据"}, ensure_ascii=False)
 
-        Returns:
-            执行结果字典
-        """
+    def execute_query(self, sql: str, params: Optional[tuple] = None) -> str:
+        """执行内部参数化查询，返回 JSON"""
+        try:
+            rows = self._fetch_all(sql, params)
+        except Exception as e:
+            logger.error(f"SQL执行错误: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+        if rows:
+            return json.dumps(
+                {"status": "success", "data": rows},
+                cls=DateTimeEncoder, ensure_ascii=False
+            )
+        return json.dumps({"status": "no_data", "message": "未找到数据"}, ensure_ascii=False)
+
+    # ---------- 写入 ----------
+
+    def execute_insert(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
         self._ensure_connection()
+        sql, params = self._adapt(sql, params)
 
         try:
             cursor = self._conn.cursor()
-            if params:
-                cursor.execute(sql, params)
-            else:
-                cursor.execute(sql)
-
+            cursor.execute(sql, params)
             self._conn.commit()
             last_id = cursor.lastrowid
             cursor.close()
-
             return {"status": "success", "id": last_id}
-
-        except MySQLError as e:
+        except Exception as e:
             logger.error(f"INSERT执行错误: {e}")
             self._conn.rollback()
             return {"status": "error", "message": str(e)}
 
-    def execute_update(self, sql: str, params: tuple = None) -> Dict[str, Any]:
-        """
-        执行UPDATE语句
-
-        Args:
-            sql: UPDATE语句
-            params: 参数元组
-
-        Returns:
-            执行结果字典
-        """
+    def execute_update(self, sql: str, params: Optional[tuple] = None) -> Dict[str, Any]:
         self._ensure_connection()
+        sql, params = self._adapt(sql, params)
 
         try:
             cursor = self._conn.cursor()
-            if params:
-                cursor.execute(sql, params)
-            else:
-                cursor.execute(sql)
-
+            cursor.execute(sql, params)
             self._conn.commit()
             affected = cursor.rowcount
             cursor.close()
-
             return {"status": "success", "affected_rows": affected}
-
-        except MySQLError as e:
+        except Exception as e:
             logger.error(f"UPDATE执行错误: {e}")
             self._conn.rollback()
             return {"status": "error", "message": str(e)}
 
+    def execute_script(self, script: str) -> None:
+        """执行多语句脚本（建表用，仅 SQLite）"""
+        self._ensure_connection()
+        if self.backend != "sqlite":
+            raise RuntimeError("execute_script 仅支持 SQLite，MySQL 请使用 sql/init_database.sql")
+        self._conn.executescript(script)
+        self._conn.commit()
+
+    # ---------- 工具 ----------
+
     def _encode_value(self, value: Any) -> Any:
-        """编码特殊类型值"""
         if isinstance(value, datetime):
             return value.strftime('%Y-%m-%d %H:%M:%S')
         if isinstance(value, date):
@@ -183,7 +192,9 @@ class DatabaseService:
         return value
 
     def close(self):
-        """关闭数据库连接"""
-        if self._conn and self._conn.is_connected():
-            self._conn.close()
-            logger.info("数据库连接已关闭")
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
+                logger.info("数据库连接已关闭")

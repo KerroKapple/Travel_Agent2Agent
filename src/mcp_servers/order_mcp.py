@@ -51,14 +51,15 @@ class OrderService(DatabaseService):
         if not table:
             return None
 
-        sql = f"SELECT * FROM {table} WHERE id = {ticket_id}"
-        result = self.execute_query(sql)
+        # 表名来自白名单映射，参数走占位符
+        sql = f"SELECT * FROM {table} WHERE id = %s"
+        result = self.execute_query(sql, (int(ticket_id),))
 
         try:
             data = json.loads(result)
             if data.get("status") == "success" and data.get("data"):
                 return data["data"][0]
-        except:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
         return None
@@ -85,13 +86,14 @@ class OrderService(DatabaseService):
         if not table:
             return False
 
+        # 表名来自白名单映射，参数走占位符
         sql = f"""
         UPDATE {table}
-        SET remaining_seats = remaining_seats - {quantity}
-        WHERE id = {ticket_id} AND remaining_seats >= {quantity}
+        SET remaining_seats = remaining_seats - %s
+        WHERE id = %s AND remaining_seats >= %s
         """
 
-        result = self.execute_update(sql)
+        result = self.execute_update(sql, (int(quantity), int(ticket_id), int(quantity)))
         return result.get("affected_rows", 0) > 0
 
     def create_order(
@@ -175,16 +177,18 @@ class OrderService(DatabaseService):
             self.update_remaining_seats(ticket_type, ticket_id, -quantity)
             return {"status": "error", "message": "订单创建失败"}
 
-    def query_order(self, order_no: str) -> dict:
+    def query_order(self, order_no: str) -> str:
         """查询订单"""
-        sql = f"SELECT * FROM orders WHERE order_no = '{order_no}'"
-        return self.execute_query(sql)
+        return self.execute_query(
+            "SELECT * FROM orders WHERE order_no = %s", (order_no,)
+        )
 
     def cancel_order(self, order_no: str) -> dict:
         """取消订单"""
         # 1. 查询订单
-        sql = f"SELECT * FROM orders WHERE order_no = '{order_no}'"
-        result = self.execute_query(sql)
+        result = self.execute_query(
+            "SELECT * FROM orders WHERE order_no = %s", (order_no,)
+        )
 
         try:
             data = json.loads(result)
@@ -196,8 +200,10 @@ class OrderService(DatabaseService):
                 return {"status": "error", "message": "只能取消待支付的订单"}
 
             # 2. 更新订单状态
-            update_sql = f"UPDATE orders SET status = 'cancelled' WHERE order_no = '{order_no}'"
-            self.execute_update(update_sql)
+            self.execute_update(
+                "UPDATE orders SET status = 'cancelled' WHERE order_no = %s",
+                (order_no,)
+            )
 
             # 3. 恢复库存
             self.update_remaining_seats(
@@ -297,24 +303,27 @@ def list_orders(
     Returns:
         JSON格式的订单列表
     """
-    conditions = []
+    # 参数化查询，杜绝拼接注入
+    conditions = ["1=1"]
+    params = []
     if contact_phone:
-        conditions.append(f"contact_phone = '{contact_phone}'")
+        conditions.append("contact_phone = %s")
+        params.append(contact_phone)
     if status:
-        conditions.append(f"status = '{status}'")
-
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
+        conditions.append("status = %s")
+        params.append(status)
+    params.append(min(int(limit), 50))
 
     sql = f"""
     SELECT order_no, ticket_type, quantity, total_price,
            contact_name, contact_phone, status, created_at
     FROM orders
-    WHERE {where_clause}
+    WHERE {' AND '.join(conditions)}
     ORDER BY created_at DESC
-    LIMIT {limit}
+    LIMIT %s
     """
 
-    return order_service.execute_query(sql)
+    return order_service.execute_query(sql, tuple(params))
 
 
 def main():
@@ -325,7 +334,9 @@ def main():
     print("📋 订单 MCP 服务")
     print("=" * 60)
     print(f"服务地址: http://localhost:{config.mcp.order_port}")
-    print(f"数据库:   {config.database.name}")
+    print(f"数据库:   {config.database.describe}")
+    if config.mock_data:
+        print("数据来源: 本地 mock 数据（随机生成），未接入真实票务 API")
     print("=" * 60)
     print("\n可用工具：")
     print("  - create_order: 创建订单")

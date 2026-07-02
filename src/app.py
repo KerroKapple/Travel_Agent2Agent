@@ -254,7 +254,8 @@ async def process_user_input(user_input: str) -> str:
 def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
-        st.image("https://via.placeholder.com/200x60?text=SmartVoyage", width=200)
+        st.markdown("## 🧭 SmartVoyage")
+        st.caption("数据为本地 mock（随机生成），未接入真实外部 API")
         st.markdown("---")
 
         st.subheader("🛠️ Agent 服务状态")

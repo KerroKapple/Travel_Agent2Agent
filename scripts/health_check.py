@@ -44,22 +44,26 @@ async def check_service(name: str, url: str, service_type: str) -> Tuple[str, bo
         (服务名, 是否正常, 详情)
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        # trust_env=False: 本机探活不走系统代理
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             response = await client.get(url)
+
+            # MCP streamable-http 端点对 GET 返回 4xx 属正常（协议要求 POST），能响应即视为存活
+            if service_type == "MCP":
+                if response.status_code < 500:
+                    return name, True, "OK"
+                return name, False, f"HTTP {response.status_code}"
 
             if response.status_code == 200:
                 if service_type == "A2A":
-                    # 解析Agent卡片
                     try:
                         card = response.json()
                         version = card.get("version", "unknown")
                         return name, True, f"v{version}"
-                    except:
+                    except Exception:
                         return name, True, "OK"
-                else:
-                    return name, True, "OK"
-            else:
-                return name, False, f"HTTP {response.status_code}"
+                return name, True, "OK"
+            return name, False, f"HTTP {response.status_code}"
 
     except httpx.ConnectError:
         return name, False, "连接失败"
@@ -117,25 +121,15 @@ def print_results(results: Dict[str, List[Tuple[str, bool, str]]]):
 
 
 async def check_database() -> bool:
-    """检查数据库连接"""
+    """检查数据库连接（SQLite / MySQL 均支持）"""
     try:
-        import mysql.connector
         from src.config import config
+        from src.mcp_servers.base_service import DatabaseService
 
-        conn = mysql.connector.connect(
-            host=config.database.host,
-            port=config.database.port,
-            user=config.database.user,
-            password=config.database.password,
-            database=config.database.name
-        )
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.fetchone()
-        cursor.close()
-        conn.close()
-
+        db = DatabaseService()
+        db.execute_query("SELECT 1 AS ok")
+        db.close()
+        print(f"  数据库: {config.database.describe}")
         return True
     except Exception as e:
         print(f"❌ 数据库连接失败: {e}")

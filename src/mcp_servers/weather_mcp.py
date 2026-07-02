@@ -19,9 +19,11 @@ mcp = FastMCP("WeatherMCP")
 class WeatherService(DatabaseService):
     """天气数据服务"""
 
+    ALLOWED_TABLES = {"weather_data"}
+
     def query_weather(self, sql: str) -> str:
         """
-        查询天气数据
+        查询天气数据（LLM 生成的 SQL，经安全层校验后执行）
 
         Args:
             sql: SQL查询语句
@@ -30,7 +32,7 @@ class WeatherService(DatabaseService):
             JSON格式的天气数据
         """
         logger.info(f"天气查询SQL: {sql}")
-        return self.execute_query(sql)
+        return self.execute_select(sql, self.ALLOWED_TABLES)
 
 
 # 创建服务实例
@@ -59,7 +61,9 @@ def main():
     print("🌤️ 天气 MCP 服务")
     print("=" * 60)
     print(f"服务地址: http://localhost:{config.mcp.weather_port}")
-    print(f"数据库:   {config.database.name}")
+    print(f"数据库:   {config.database.describe}")
+    if config.mock_data:
+        print("数据来源: 本地 mock 数据（随机生成），未接入真实天气 API")
     print("=" * 60)
 
     # 使用streamable_http方式运行

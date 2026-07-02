@@ -1,183 +1,148 @@
-# SmartVoyage 智能旅行助手系统
+# SmartVoyage 智能旅行助手（A2A 多智能体学习项目）
 
-<div align="center">
+基于 **python-a2a**（A2A 协议社区实现）+ **MCP** + **LLM Text2SQL** 的多 Agent 协同 demo，
+Streamlit / CLI 前端，SQLite（默认）/ MySQL 数据层。
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
-![Python](https://img.shields.io/badge/python-3.9+-green.svg)
-![License](https://img.shields.io/badge/license-MIT-orange.svg)
+> **诚实声明（请先读）**
+>
+> - 本项目是**学习/演示项目**，所有天气、火车票、机票、演唱会数据均由
+>   `scripts/init_data.py` **随机生成（mock）**，不来自任何真实外部 API。
+> - 配置项 `MOCK_DATA=true` 显式声明这一点，各 MCP 服务启动时也会打印数据来源。
+> - LLM（Text2SQL / 意图识别）是唯一的真实外部依赖；未配置 `LLM_API_KEY` 时，
+>   两个离线 demo 仍可完整验证 A2A + MCP + SQL 安全层 + 数据库全链路。
 
-**基于 Agent2Agent (A2A) 协议的多Agent协同旅行服务平台**
+## 功能与真实度
 
-[快速开始](#快速开始) • [项目文档](docs/) • [API文档](docs/api/) • [常见问题](docs/FAQ.md)
+| 功能 | 实现方式 | 真实度 |
+|------|---------|--------|
+| 天气查询 | LLM 生成 SQL -> 天气 MCP -> 数据库 | 数据 mock |
+| 火车票/机票/演唱会查询 | LLM 生成 SQL -> 票务 MCP -> 数据库 | 数据 mock |
+| 在线订票 | 订票 Agent --A2A--> 票务 Agent，再经订单 MCP 落库扣减库存 | 数据 mock，流程真实 |
+| 景点推荐 | 纯 LLM 生成 | 依赖 LLM |
+| 意图识别/多意图路由 | 编排层 LLM | 依赖 LLM |
 
-</div>
-
----
-
-## 📖 项目简介
-
-SmartVoyage 是一个基于 **Agent2Agent (A2A)** 协议构建的智能旅行助手系统，采用多Agent协同架构，通过自然语言处理技术为用户提供一站式旅行服务。
-
-### 核心功能
-
-| 功能模块 | 描述 | 状态 |
-|---------|------|:----:|
-| 🌤️ 天气查询 | 支持多城市天气预报查询 | ✅ |
-| 🚄 火车票查询 | 高铁/火车票余票查询 | ✅ |
-| ✈️ 机票查询 | 航班机票信息查询 | ✅ |
-| 🎤 演唱会票查询 | 演唱会门票查询 | ✅ |
-| 🎫 在线订票 | 一键预订各类票务 | ✅ |
-| 🏞️ 景点推荐 | 智能旅游景点推荐 | ✅ |
-
----
-
-## 🏗️ 系统架构
+## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      用户界面层                          │
-│         Streamlit Web  │  CLI 命令行                    │
-├─────────────────────────────────────────────────────────┤
-│                      业务逻辑层                          │
-│    ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │
-│    │   Weather   │  │   Ticket    │  │    Order    │   │
-│    │   Agent     │  │   Agent     │  │    Agent    │   │
-│    │   :5005     │  │   :5006     │  │    :5007    │   │
-│    └──────┬──────┘  └──────┬──────┘  └──────┬──────┘   │
-├───────────┼────────────────┼────────────────┼──────────┤
-│           │                │                │           │
-│    ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐   │
-│    │ Weather MCP │  │ Ticket MCP  │  │  Order MCP  │   │
-│    │    :8000    │  │    :8001    │  │    :8002    │   │
-│    └──────┬──────┘  └──────┬──────┘  └──────┬──────┘   │
-├───────────┴────────────────┴────────────────┴──────────┤
-│                      数据存储层                          │
-│                    MySQL Database                       │
-└─────────────────────────────────────────────────────────┘
+用户界面层      Streamlit(src/app.py)  /  CLI(src/main.py)
+                    │  意图识别 + 路由（编排式，LLM）
+                    ▼  A2A 协议 (python-a2a)
+业务 Agent 层   WeatherAgent:5005   TicketAgent:5006   OrderAgent:5007
+                    │                    ▲ A2A（Agent 间协作）
+                    │                    └──── OrderAgent 查余票
+                    ▼  MCP 协议 (streamable-http)
+数据服务层      WeatherMCP:8000    TicketMCP:8001     OrderMCP:8002
+                    │  SQL 安全层 sql_guard（仅 SELECT + 表白名单 + 强制 LIMIT）
+                    ▼
+数据存储层      SQLite (默认, data/travel_demo.db)  或  MySQL (travel_rag)
 ```
 
----
+## 快速开始
 
-## 📁 项目结构
-
-```
-SmartVoyage/
-├── README.md                 # 项目说明
-├── requirements.txt          # Python依赖
-├── docker-compose.yml        # Docker编排配置
-├── .env.example              # 环境变量模板
-│
-├── docs/                     # 项目文档
-│   ├── 技术设计文档.md
-│   ├── API接口文档.md
-│   ├── 部署运维手册.md
-│   └── 用户使用手册.md
-│
-├── src/                      # 源代码
-│   ├── __init__.py
-│   ├── main.py               # CLI主程序
-│   ├── app.py                # Streamlit应用
-│   │
-│   ├── config/               # 配置模块
-│   │   ├── __init__.py
-│   │   ├── settings.py       # 全局配置
-│   │   └── logging_config.py # 日志配置
-│   │
-│   ├── agents/               # A2A Agent服务
-│   │   ├── __init__.py
-│   │   ├── base_agent.py     # Agent基类
-│   │   ├── weather_agent.py  # 天气Agent
-│   │   ├── ticket_agent.py   # 票务Agent
-│   │   └── order_agent.py    # 订票Agent
-│   │
-│   ├── mcp_servers/          # MCP数据服务
-│   │   ├── __init__.py
-│   │   ├── base_service.py   # 服务基类
-│   │   ├── weather_mcp.py    # 天气MCP
-│   │   ├── ticket_mcp.py     # 票务MCP
-│   │   └── order_mcp.py      # 订单MCP
-│   │
-│   ├── prompts/              # Prompt模板
-│   │   ├── __init__.py
-│   │   └── templates.py      # Prompt定义
-│   │
-│   └── utils/                # 工具模块
-│       ├── __init__.py
-│       ├── formatters.py     # 格式化工具
-│       └── validators.py     # 验证工具
-│
-├── scripts/                  # 脚本工具
-│   ├── init_data.py          # 数据初始化
-│   ├── health_check.py       # 健康检查
-│   └── start_services.sh     # 服务启动脚本
-│
-├── sql/                      # 数据库脚本
-│   ├── init_database.sql     # 建库建表
-│   └── init_test_data.sql    # 测试数据
-│
-├── tests/                    # 测试用例
-│   ├── __init__.py
-│   ├── test_agents.py
-│   └── test_mcp_servers.py
-│
-└── logs/                     # 日志目录
-    └── .gitkeep
-```
-
----
-
-## 🚀 快速开始
-
-### 环境要求
-
-- Python 3.9+
-- MySQL 8.0+
-- 阿里云DashScope API Key
-
-### 安装步骤
+环境要求：[uv](https://docs.astral.sh/uv/)（本项目不使用系统 Python / pip）
 
 ```bash
-# 1. 克隆项目
-git clone https://github.com/your-org/smartvoyage.git
-cd smartvoyage
-
-# 2. 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
-
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 配置环境变量
-cp .env .env
-# 编辑 .env 文件，填入API Key等配置
-
-# 5. 初始化数据库
-mysql -u root -p < sql/init_database.sql
-
-# 6. 启动服务
-bash scripts/start_services.sh
+git clone <repo>
+cd Travel_Agent2Agent
+uv sync                       # 安装依赖（pyproject.toml + uv.lock）
 ```
 
-### 访问系统
+### 1. 零依赖离线 Demo（无需 LLM Key / MySQL / 外网）
 
-- Web界面: http://localhost:8501
-- 天气Agent: http://localhost:5005
-- 票务Agent: http://localhost:5006
-- 订票Agent: http://localhost:5007
+```bash
+# 数据层 + SQL 安全防线 + 订单生命周期
+uv run python -m scripts.demo_offline
 
----
+# A2A + MCP 全链路联调（用固定 SQL 模拟 LLM 输出）
+uv run python -m scripts.demo_a2a_e2e
+```
 
-## 📚 文档
+Windows 控制台如遇编码报错，先执行 `set PYTHONUTF8=1`（或 PowerShell `$env:PYTHONUTF8=1`）。
 
-| 文档 | 描述 |
-|------|------|
-| [技术设计文档](docs/技术设计文档.md) | 系统架构、模块设计、数据库设计 |
-| [API接口文档](docs/API接口文档.md) | A2A/MCP接口规范 |
-| [部署运维手册](docs/部署运维手册.md) | 安装部署、配置管理、故障排查 |
-| [用户使用手册](docs/用户使用手册.md) | 功能介绍、操作指南 |
+### 2. 完整服务（需要 LLM Key）
 
----
+```bash
+cp .env.example .env          # 填入 LLM_API_KEY（OpenAI 兼容接口）
+uv run python -m scripts.init_data          # 生成 mock 数据（默认 SQLite）
 
+# 逐个启动（或 bash scripts/start_services.sh）
+uv run python -m src.mcp_servers.weather_mcp
+uv run python -m src.mcp_servers.ticket_mcp
+uv run python -m src.mcp_servers.order_mcp
+uv run python -m src.agents.weather_agent
+uv run python -m src.agents.ticket_agent
+uv run python -m src.agents.order_agent
 
+# 前端二选一
+uv run streamlit run src/app.py             # http://localhost:8501
+uv run python -m src.main                   # CLI
+```
+
+### 3. MySQL 后端（可选）
+
+```bash
+mysql -u root -p < sql/init_database.sql
+# .env: DB_BACKEND=mysql + DB_* 连接信息
+uv run python -m scripts.init_data
+```
+
+## 测试
+
+```bash
+# 单元测试（离线可跑）：SQL 安全层 + 数据校验器
+uv run python -m pytest tests/test_sql_guard.py tests/test_validators.py -v
+
+# 集成测试（需服务已启动 + LLM Key）
+RUN_INTEGRATION=1 uv run python -m pytest tests/test_agents.py -v
+
+# 服务健康检查
+uv run python -m scripts.health_check
+```
+
+## Text2SQL 安全防线
+
+LLM 生成的 SQL 属于**不可信输入**，一律经 `src/mcp_servers/sql_guard.py` 校验后才执行：
+
+1. 仅允许**单条 SELECT**（sqlparse 语法级判定 + 正则双保险）
+2. 禁止注释 / 多语句 / UNION / 写操作与危险函数关键字
+3. **表名白名单**（每个 MCP 服务只能查自己的表）
+4. **强制 LIMIT** 上限（防大结果集拖库）
+
+结构化参数入口（如 `query_train_tickets`）全部使用**参数化查询**，无字符串拼接。
+详见 `docs/复习笔记.md`。
+
+## 项目结构
+
+```
+├── pyproject.toml / uv.lock  # uv 项目与依赖锁定
+├── .env.example              # 环境变量模板
+├── docs/                     # 文档（含 复习笔记.md）
+├── sql/
+│   ├── init_database.sql     # MySQL 建库建表
+│   └── init_sqlite.sql       # SQLite 建表（离线 demo）
+├── scripts/
+│   ├── init_data.py          # mock 数据生成（双后端）
+│   ├── demo_offline.py       # 离线端到端 demo
+│   ├── demo_a2a_e2e.py       # A2A+MCP 全链路联调（模拟 LLM）
+│   ├── health_check.py       # 服务健康检查
+│   └── start_services.sh     # 一键启动
+├── src/
+│   ├── main.py / app.py      # CLI / Streamlit 编排层
+│   ├── config/               # 配置 + 日志
+│   ├── agents/               # A2A Agent（base/weather/ticket/order）
+│   ├── mcp_servers/          # MCP 服务（base/sql_guard/weather/ticket/order）
+│   ├── prompts/              # Prompt 模板
+│   └── utils/                # 校验、格式化
+└── tests/                    # 单测 + 集成测试
+```
+
+## 已知限制
+
+- 数据全部 mock，随机生成，不具备真实参考价值
+- A2A 服务端为 Flask 开发服务器，仅供本地演示
+- 订单扣库存/回滚为两步操作，非事务，并发下可能不一致（demo 范围内可接受）
+- 未实现支付、退款、用户体系
+
+## License
+
+MIT

@@ -1,0 +1,23 @@
+[project]
+name = "travel-agent2agent"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "langchain-core>=1.4.8",
+    "langchain-openai>=1.3.3",
+    "mcp>=1.28.1",
+    "mysql-connector-python>=9.7.0",
+    "python-a2a>=0.5.10",
+    "python-dotenv>=1.2.2",
+    "pytz>=2026.2",
+    "sqlparse>=0.5.5",
+    "streamlit>=1.58.0",
+    "uvicorn>=0.49.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

@@ -19,9 +19,11 @@ mcp = FastMCP("TicketMCP")
 class TicketService(DatabaseService):
     """票务数据服务"""
 
+    ALLOWED_TABLES = {"train_tickets", "flight_tickets", "concert_tickets"}
+
     def query_tickets(self, sql: str) -> str:
         """
-        查询票务数据
+        查询票务数据（LLM 生成的 SQL，经安全层校验后执行）
 
         Args:
             sql: SQL查询语句
@@ -30,7 +32,7 @@ class TicketService(DatabaseService):
             JSON格式的票务数据
         """
         logger.info(f"票务查询SQL: {sql}")
-        return self.execute_query(sql)
+        return self.execute_select(sql, self.ALLOWED_TABLES)
 
 
 # 创建服务实例
@@ -70,20 +72,24 @@ def query_train_tickets(
     Returns:
         JSON格式的火车票数据
     """
-    sql = f"""
+    # 参数化查询，杜绝拼接注入
+    sql = """
     SELECT id, departure_city, arrival_city, departure_time, arrival_time,
            train_number, seat_type, price, remaining_seats
     FROM train_tickets
-    WHERE departure_city = '{departure_city}'
-      AND arrival_city = '{arrival_city}'
-      AND DATE(departure_time) = '{date}'
+    WHERE departure_city = %s
+      AND arrival_city = %s
+      AND DATE(departure_time) = %s
       AND remaining_seats > 0
     """
+    params = [departure_city, arrival_city, date]
     if seat_type:
-        sql += f" AND seat_type = '{seat_type}'"
-    sql += " ORDER BY departure_time"
+        sql += " AND seat_type = %s"
+        params.append(seat_type)
+    sql += " ORDER BY departure_time LIMIT 20"
 
-    return ticket_service.query_tickets(sql)
+    logger.info(f"火车票参数化查询: {params}")
+    return ticket_service.execute_query(sql, tuple(params))
 
 
 @mcp.tool()
@@ -105,20 +111,24 @@ def query_flight_tickets(
     Returns:
         JSON格式的机票数据
     """
-    sql = f"""
+    # 参数化查询，杜绝拼接注入
+    sql = """
     SELECT id, departure_city, arrival_city, departure_time, arrival_time,
            flight_number, cabin_type, price, remaining_seats
     FROM flight_tickets
-    WHERE departure_city = '{departure_city}'
-      AND arrival_city = '{arrival_city}'
-      AND DATE(departure_time) = '{date}'
+    WHERE departure_city = %s
+      AND arrival_city = %s
+      AND DATE(departure_time) = %s
       AND remaining_seats > 0
     """
+    params = [departure_city, arrival_city, date]
     if cabin_type:
-        sql += f" AND cabin_type = '{cabin_type}'"
-    sql += " ORDER BY departure_time"
+        sql += " AND cabin_type = %s"
+        params.append(cabin_type)
+    sql += " ORDER BY departure_time LIMIT 20"
 
-    return ticket_service.query_tickets(sql)
+    logger.info(f"机票参数化查询: {params}")
+    return ticket_service.execute_query(sql, tuple(params))
 
 
 @mcp.tool()
@@ -140,28 +150,33 @@ def query_concert_tickets(
     Returns:
         JSON格式的演唱会票数据
     """
+    # 参数化查询，杜绝拼接注入
     conditions = ["remaining_seats > 0"]
+    params = []
 
     if city:
-        conditions.append(f"city = '{city}'")
+        conditions.append("city = %s")
+        params.append(city)
     if artist:
-        conditions.append(f"artist LIKE '%{artist}%'")
+        conditions.append("artist LIKE %s")
+        params.append(f"%{artist}%")
     if date:
-        conditions.append(f"DATE(start_time) = '{date}'")
+        conditions.append("DATE(start_time) = %s")
+        params.append(date)
     if ticket_type:
-        conditions.append(f"ticket_type = '{ticket_type}'")
-
-    where_clause = " AND ".join(conditions)
+        conditions.append("ticket_type = %s")
+        params.append(ticket_type)
 
     sql = f"""
     SELECT id, artist, city, venue, start_time, end_time,
            ticket_type, price, remaining_seats
     FROM concert_tickets
-    WHERE {where_clause}
-    ORDER BY start_time
+    WHERE {' AND '.join(conditions)}
+    ORDER BY start_time LIMIT 20
     """
 
-    return ticket_service.query_tickets(sql)
+    logger.info(f"演唱会参数化查询: {params}")
+    return ticket_service.execute_query(sql, tuple(params))
 
 
 def main():
@@ -172,7 +187,9 @@ def main():
     print("🎫 票务 MCP 服务")
     print("=" * 60)
     print(f"服务地址: http://localhost:{config.mcp.ticket_port}")
-    print(f"数据库:   {config.database.name}")
+    print(f"数据库:   {config.database.describe}")
+    if config.mock_data:
+        print("数据来源: 本地 mock 数据（随机生成），未接入真实票务 API")
     print("=" * 60)
     print("\n可用工具：")
     print("  - query_tickets: 通用SQL查询")

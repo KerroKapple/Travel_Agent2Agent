@@ -34,24 +34,34 @@ class LLMConfig:
 
 @dataclass
 class DatabaseConfig:
-    """数据库配置"""
+    """数据库配置：backend=sqlite（默认，零依赖demo）或 mysql"""
+    backend: str = field(default_factory=lambda: os.getenv("DB_BACKEND", "sqlite").lower())
+    sqlite_path: Path = field(default_factory=lambda: Path(
+        os.getenv("SQLITE_PATH", str(PROJECT_ROOT / "data" / "travel_demo.db"))
+    ))
     host: str = field(default_factory=lambda: os.getenv("DB_HOST", "localhost"))
     port: int = field(default_factory=lambda: int(os.getenv("DB_PORT", "3306")))
     user: str = field(default_factory=lambda: os.getenv("DB_USER", "root"))
     password: str = field(default_factory=lambda: os.getenv("DB_PASSWORD", "root"))
-    database: str = field(default_factory=lambda: os.getenv("DB_NAME", "travel_rag"))
+    name: str = field(default_factory=lambda: os.getenv("DB_NAME", "travel_rag"))
     charset: str = "utf8mb4"
-    pool_size: int = field(default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "5")))
-    
+
     @property
-    def connection_params(self) -> Dict:
-        """返回数据库连接参数"""
+    def describe(self) -> str:
+        """人类可读的数据源描述"""
+        if self.backend == "sqlite":
+            return f"SQLite ({self.sqlite_path})"
+        return f"MySQL ({self.host}:{self.port}/{self.name})"
+
+    @property
+    def mysql_params(self) -> Dict:
+        """MySQL连接参数"""
         return {
             "host": self.host,
             "port": self.port,
             "user": self.user,
             "password": self.password,
-            "database": self.database,
+            "database": self.name,
             "charset": self.charset
         }
 
@@ -107,22 +117,6 @@ class MCPConfig:
 
 
 @dataclass
-class ExternalAPIConfig:
-    """外部API配置"""
-    # 和风天气API
-    qweather_api_key: str = field(default_factory=lambda: os.getenv("QWEATHER_API_KEY", ""))
-    qweather_base_url: str = "https://ne5u9wc3nu.re.qweatherapi.com/v7"
-    
-    # Aviationstack航班API
-    aviationstack_api_key: str = field(default_factory=lambda: os.getenv("AVIATIONSTACK_API_KEY", ""))
-    aviationstack_base_url: str = "http://api.aviationstack.com/v1"
-    
-    # Ticketmaster演唱会API
-    ticketmaster_api_key: str = field(default_factory=lambda: os.getenv("TICKETMASTER_API_KEY", ""))
-    ticketmaster_base_url: str = "https://app.ticketmaster.com/discovery/v2"
-
-
-@dataclass
 class LogConfig:
     """日志配置"""
     level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
@@ -139,13 +133,14 @@ class AppConfig:
     version: str = "2.0.0"
     debug: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
     timezone: str = "Asia/Shanghai"
-    
+    # 诚实声明：库中的天气/票务数据均为脚本随机生成的 mock 数据，未接入任何真实外部 API
+    mock_data: bool = field(default_factory=lambda: os.getenv("MOCK_DATA", "true").lower() == "true")
+
     # 子配置
     llm: LLMConfig = field(default_factory=LLMConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     agents: AgentConfig = field(default_factory=AgentConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
-    external_api: ExternalAPIConfig = field(default_factory=ExternalAPIConfig)
     log: LogConfig = field(default_factory=LogConfig)
 
 
@@ -167,13 +162,13 @@ def print_config():
     print(f"Version: {config.version}")
     print(f"Debug Mode: {config.debug}")
     print(f"Timezone: {config.timezone}")
+    print(f"Mock Data: {config.mock_data} (数据为随机生成，未接真实API)")
     print("-" * 60)
     print(f"LLM Model: {config.llm.model_name}")
     print(f"LLM Base URL: {config.llm.base_url}")
     print(f"LLM API Key: {'***' + config.llm.api_key[-4:] if config.llm.api_key else 'NOT SET'}")
     print("-" * 60)
-    print(f"Database Host: {config.database.host}:{config.database.port}")
-    print(f"Database Name: {config.database.database}")
+    print(f"Database: {config.database.describe}")
     print("-" * 60)
     print(f"Weather Agent: {config.agents.weather_url}")
     print(f"Ticket Agent: {config.agents.ticket_url}")
