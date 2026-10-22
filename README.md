@@ -1,5 +1,7 @@
 # SmartVoyage 智能旅行助手（A2A 多智能体学习项目）
 
+本项目实在学习A2A的时候在网上找的项目复刻的,也是自己第一次尝试,因为工作中项目基本上都是MCP较多,已经不维护啦,而且也只能顶国外的,关键内容还是靠自己啦,我可没能力接12306哈!
+
 基于 **python-a2a**（A2A 协议社区实现）+ **MCP** + **LLM Text2SQL** 的多 Agent 协同 demo，
 Streamlit / CLI 前端，SQLite（默认）/ MySQL 数据层。
 
